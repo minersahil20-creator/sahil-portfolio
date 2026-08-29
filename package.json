@@ -1,0 +1,31 @@
+{
+  "name": "sahil-portfolio-booking",
+  "version": "1.0.0",
+  "description": "Sahil Sinha portfolio with full-stack OTP booking and direct UPI checkout.",
+  "main": "server.js",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js",
+    "check": "node --check server.js"
+  },
+  "keywords": [
+    "portfolio",
+    "booking",
+    "upi",
+    "express",
+    "glassmorphism"
+  ],
+  "author": "Sahil Sinha",
+  "license": "MIT",
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "express-rate-limit": "^7.4.1",
+    "helmet": "^7.1.0",
+    "nodemailer": "^9.0.6",
+    "qrcode": "^1.5.4"
+  }
+}
