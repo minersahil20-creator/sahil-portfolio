@@ -1,5 +1,5 @@
-// Vercel serverless function handler for Express app
-const serverless = require('serverless-http');
+// Simple Vercel serverless function handler
 const app = require('../server');
 
-module.exports = serverless(app);
+// Vercel expects module.exports to be a function for Node.js runtime
+module.exports = app;

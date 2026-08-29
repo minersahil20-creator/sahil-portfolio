@@ -721,14 +721,11 @@ app.use((error, _req, res, _next) => {
   res.status(status).json({ message });
 });
 
+module.exports = app;
+
 // Only start server if running locally (not on Vercel)
-if (process.env.VERCEL === 'true' || process.env.VERCEL) {
-  module.exports = app;
-} else if (require.main === module) {
+if (require.main === module && !process.env.VERCEL) {
   app.listen(PORT, HOST, () => {
     console.log(`Sahil portfolio server running at http://${HOST}:${PORT}`);
   });
-  module.exports = app;
-} else {
-  module.exports = app;
 }
