@@ -18,7 +18,9 @@ const OTP_TTL_MS = 10 * 60 * 1000;
 const OTP_MAX_ATTEMPTS = 5;
 const OTP_PEPPER = process.env.OTP_PEPPER || crypto.randomBytes(32).toString('hex');
 
-const DATA_DIR = path.join(__dirname, 'data');
+// Vercel serverless functions can only write to /tmp. For local/dev hosting,
+// keep using the project data folder. For durable production storage, connect a DB.
+const DATA_DIR = process.env.VERCEL ? path.join('/tmp', 'sahil-portfolio-data') : path.join(__dirname, 'data');
 const BOOKINGS_PATH = path.join(DATA_DIR, 'bookings.json');
 const REVIEWS_PATH = path.join(DATA_DIR, 'reviews.json');
 
@@ -846,6 +848,10 @@ app.use((error, _req, res, _next) => {
   res.status(status).json({ message });
 });
 
-app.listen(PORT, HOST, () => {
-  console.log(`Sahil portfolio server running at http://${HOST}:${PORT}`);
-});
+if (require.main === module) {
+  app.listen(PORT, HOST, () => {
+    console.log(`Sahil portfolio server running at http://${HOST}:${PORT}`);
+  });
+}
+
+module.exports = app;
