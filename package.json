@@ -1,7 +1,7 @@
 {
   "name": "sahil-portfolio-booking",
   "version": "1.0.0",
-  "description": "Sahil Sinha portfolio with full-stack OTP booking and direct UPI checkout.",
+  "description": "Sahil Sinha portfolio with direct UPI checkout.",
   "main": "server.js",
   "engines": {
     "node": ">=18"
