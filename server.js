@@ -319,6 +319,7 @@ function isValidPhone(phone = '') {
 function validateBookingIdentity(body) {
   const name = cleanText(body.name, 80);
   const phone = normalizePhone(body.phone || body.number);
+  const email = normalizeEmail(body.email);
 
   if (name.length < 2) {
     const error = new Error('Please enter your full name.');
@@ -332,7 +333,13 @@ function validateBookingIdentity(body) {
     throw error;
   }
 
-  return { name, phone };
+  if (!isValidEmail(email)) {
+    const error = new Error('Please enter a valid email address.');
+    error.status = 400;
+    throw error;
+  }
+
+  return { name, phone, email };
 }
 
 function publicQuote(quote) {
@@ -453,10 +460,10 @@ async function notifyReviewSubmitted(review) {
 }
 
 async function notifyBookingSubmitted(booking) {
-  if (!hasAnyEmailConfig()) return;
+  if (!hasAnyEmailConfig()) return false;
 
   const ownerEmail = process.env.BOOKING_NOTIFY_EMAIL || process.env.BREVO_SENDER_EMAIL || process.env.SMTP_USER;
-  if (!ownerEmail) return;
+  if (!ownerEmail) return false;
 
   const addons = booking.quote.addons.map((addon) => `${addon.name} (₹${addon.price})`).join(', ') || 'None';
   const customWork = booking.quote.customWork
@@ -467,13 +474,14 @@ async function notifyBookingSubmitted(booking) {
     to: ownerEmail,
     toName: 'Sahil Sinha',
     subject: `New UPI booking submitted: ${booking.bookingId}`,
-    text: `New booking submitted for manual UPI verification.\n\nBooking ID: ${booking.bookingId}\nName: ${booking.name}\nPhone: ${booking.phone}\nPlan: ${booking.quote.plan.name}\nAdd-ons: ${addons}\nCustom work: ${customWork}\nTotal: ₹${booking.quote.total}\nUPI Reference/UTR: ${booking.upi.utr}\nUPI Transaction Ref: ${booking.upi.transactionRef}\n\nPlease confirm this payment in your UPI/bank app before starting work.`,
+    text: `New booking submitted for manual UPI verification.\n\nBooking ID: ${booking.bookingId}\nName: ${booking.name}\nPhone: ${booking.phone}\nEmail: ${booking.email}\nPlan: ${booking.quote.plan.name}\nAdd-ons: ${addons}\nCustom work: ${customWork}\nTotal: ₹${booking.quote.total}\nUPI Reference/UTR: ${booking.upi.utr}\nUPI Transaction Ref: ${booking.upi.transactionRef}\n\nPlease confirm this payment in your UPI/bank app before starting work.`,
     html: `
       <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; line-height: 1.6; color: #111;">
         <h2>New UPI booking submitted</h2>
         <p><strong>Booking ID:</strong> ${escapeHtml(booking.bookingId)}</p>
         <p><strong>Name:</strong> ${escapeHtml(booking.name)}</p>
         <p><strong>Phone:</strong> ${escapeHtml(booking.phone)}</p>
+        <p><strong>Email:</strong> ${escapeHtml(booking.email)}</p>
         <p><strong>Plan:</strong> ${escapeHtml(booking.quote.plan.name)}</p>
         <p><strong>Add-ons:</strong> ${escapeHtml(addons)}</p>
         <p><strong>Custom work:</strong> ${escapeHtml(customWork)}</p>
@@ -484,6 +492,8 @@ async function notifyBookingSubmitted(booking) {
       </div>
     `
   });
+
+  return true;
 }
 
 function cleanupExpiredMemory() {
@@ -520,7 +530,7 @@ app.post('/api/create-order', checkoutLimiter, async (req, res, next) => {
       throw error;
     }
 
-    const { name, phone } = validateBookingIdentity(req.body);
+    const { name, phone, email } = validateBookingIdentity(req.body);
     const quote = calculateQuote(req.body);
     const orderId = `UPI${Date.now()}${crypto.randomBytes(3).toString('hex').toUpperCase()}`;
     const bookingId = `BK${Date.now()}${crypto.randomBytes(3).toString('hex').toUpperCase()}`;
@@ -547,6 +557,7 @@ app.post('/api/create-order', checkoutLimiter, async (req, res, next) => {
       orderId,
       name,
       phone,
+      email,
       quote: publicQuote(quote),
       paymentMethod: 'upi',
       status: 'upi_created',
@@ -670,9 +681,12 @@ app.post('/api/verify-payment', checkoutLimiter, async (req, res, next) => {
     await appendBooking(storedBooking);
     pendingOrders.delete(orderId);
 
-    notifyBookingSubmitted(storedBooking).catch((error) => {
+    let notificationSent = false;
+    try {
+      notificationSent = await notifyBookingSubmitted(storedBooking);
+    } catch (error) {
       console.error('Unable to send booking notification email:', error.message);
-    });
+    }
 
     res.json({
       success: true,
@@ -680,6 +694,7 @@ app.post('/api/verify-payment', checkoutLimiter, async (req, res, next) => {
       orderId,
       paymentReference: utr,
       status: storedBooking.status,
+      notificationSent,
       message: 'Payment details submitted. Your booking is pending manual UPI verification.'
     });
   } catch (error) {

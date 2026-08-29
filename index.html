@@ -885,7 +885,7 @@
         <div class="mesh-orb orb-two"></div>
         <p class="section-kicker">Secure Booking</p>
         <h2 class="section-title">Start your premium website build.</h2>
-        <p class="section-copy">Enter your details, choose a service tier, add optional extras, and pay directly through UPI using a generated QR code or UPI app link. The final total uses the updated package pricing.</p>
+        <p class="section-copy">Enter your full name, phone number, and email, choose a service tier, add optional extras, and pay directly through UPI using a generated QR code or UPI app link. The final total uses the updated package pricing.</p>
 
         <div class="booking-panel" aria-live="polite">
             <div class="booking-progress">
@@ -902,6 +902,9 @@
                     </label>
                     <label class="field-label" for="booking-phone">Phone Number
                         <input class="glass-input" id="booking-phone" type="tel" placeholder="Your phone number" autocomplete="tel" inputmode="tel" required>
+                    </label>
+                    <label class="field-label" for="booking-email">Email ID
+                        <input class="glass-input" id="booking-email" type="email" placeholder="you@example.com" autocomplete="email" required>
                     </label>
                 </div>
 
@@ -1320,18 +1323,25 @@
         function getIdentity() {
             return {
                 name: byId('booking-name').value.trim(),
-                phone: byId('booking-phone').value.trim()
+                phone: byId('booking-phone').value.trim(),
+                email: byId('booking-email').value.trim().toLowerCase()
             };
         }
 
         function isValidPhone(phone) {
-            return phone.replace(/\D/g, '').length >= 10 && phone.replace(/\D/g, '').length <= 15;
+            const digits = phone.replace(/\D/g, '');
+            return digits.length >= 10 && digits.length <= 15;
+        }
+
+        function isValidEmail(email) {
+            return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
         }
 
         function validateIdentity() {
             const identity = getIdentity();
             if (identity.name.length < 2) throw new Error('Please enter your full name before continuing.');
             if (!isValidPhone(identity.phone)) throw new Error('Please enter a valid phone number.');
+            if (!isValidEmail(identity.email)) throw new Error('Please enter a valid email ID.');
             return identity;
         }
 
@@ -1546,7 +1556,10 @@
 
         function showSuccess(verification, total) {
             byId('success-title').textContent = 'Payment Details Submitted';
-            byId('success-copy').textContent = `Booking ${verification.bookingId} has been saved for ${rupees.format(total)}. UPI reference/UTR: ${verification.paymentReference}. Please wait for manual payment verification before work starts.`;
+            const notificationMessage = verification.notificationSent
+                ? ' A notification email has been sent to Sahil.'
+                : ' The booking was saved, but notification email delivery is not configured yet.';
+            byId('success-copy').textContent = `Booking ${verification.bookingId} has been saved for ${rupees.format(total)}. UPI reference/UTR: ${verification.paymentReference}.${notificationMessage} Please wait for manual payment verification before work starts.`;
             byId('success-modal').classList.remove('hidden');
         }
 
