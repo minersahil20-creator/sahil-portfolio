@@ -1,17 +1,23 @@
 {
   "version": 2,
-  "build": {
-    "command": "npm install",
-    "outputDirectory": "."
-  },
-  "rewrites": [
+  "builds": [
     {
-      "source": "/api/:path*",
-      "destination": "/api/:path*"
+      "src": "index.html",
+      "use": "@vercel/static"
     },
     {
-      "source": "/(.*)",
-      "destination": "/index.html"
+      "src": "api/*.js",
+      "use": "@vercel/node"
+    }
+  ],
+  "routes": [
+    {
+      "src": "/api/(.*)",
+      "dest": "/api/$1"
+    },
+    {
+      "src": "/(.*)",
+      "dest": "/index.html"
     }
   ]
 }
