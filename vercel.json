@@ -1,5 +1,9 @@
 {
   "version": 2,
+  "build": {
+    "command": "npm install",
+    "outputDirectory": "."
+  },
   "rewrites": [
     {
       "source": "/api/:path*",
