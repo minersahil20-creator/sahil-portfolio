@@ -326,7 +326,6 @@
             background: rgba(255,255,255,0.08);
         }
 
-        .otp-row,
         .action-row,
         .checkout-actions {
             display: flex;
@@ -335,8 +334,6 @@
             align-items: center;
             margin-top: 18px;
         }
-
-        .otp-row .field-label { flex: 1 1 280px; }
 
         .status-message {
             display: none;
@@ -888,11 +885,11 @@
         <div class="mesh-orb orb-two"></div>
         <p class="section-kicker">Secure Booking</p>
         <h2 class="section-title">Start your premium website build.</h2>
-        <p class="section-copy">Verify your email, choose a service tier, add optional extras, and pay directly through UPI using a generated QR code or UPI app link. The final total uses the updated package pricing.</p>
+        <p class="section-copy">Enter your details, choose a service tier, add optional extras, and pay directly through UPI using a generated QR code or UPI app link. The final total uses the updated package pricing.</p>
 
         <div class="booking-panel" aria-live="polite">
             <div class="booking-progress">
-                <div class="progress-step active" data-progress="details"><span>1</span><strong>Details & OTP</strong></div>
+                <div class="progress-step active" data-progress="details"><span>1</span><strong>Client Details</strong></div>
                 <div class="progress-step" data-progress="plans"><span>2</span><strong>Plan & Checkout</strong></div>
             </div>
 
@@ -903,21 +900,13 @@
                     <label class="field-label" for="booking-name">Name
                         <input class="glass-input" id="booking-name" type="text" placeholder="Your full name" autocomplete="name" required>
                     </label>
-                    <label class="field-label" for="booking-email">Email ID
-                        <input class="glass-input" id="booking-email" type="email" placeholder="you@example.com" autocomplete="email" required>
-                    </label>
-                </div>
-
-                <div class="otp-row">
-                    <button class="glass-small-button" id="send-otp" type="button">Send OTP</button>
-                    <label class="field-label" for="booking-otp">6-digit OTP
-                        <input class="glass-input" id="booking-otp" type="text" inputmode="numeric" maxlength="6" placeholder="Enter code" autocomplete="one-time-code">
+                    <label class="field-label" for="booking-phone">Phone Number
+                        <input class="glass-input" id="booking-phone" type="tel" placeholder="Your phone number" autocomplete="tel" inputmode="tel" required>
                     </label>
                 </div>
 
                 <div class="action-row">
-                    <button class="glass-small-button" id="verify-otp" type="button">Verify OTP</button>
-                    <button class="glass-button" id="continue-to-plans" type="button" disabled>Continue to Plans</button>
+                    <button class="glass-button" id="continue-to-plans" type="button">Continue to Plans</button>
                 </div>
             </div>
 
@@ -1291,12 +1280,8 @@
         let addonOptions = [...defaultAddons];
         let paymentReady = false;
         let currentUpiOrder = null;
-        let otpDebounce;
 
         const bookingState = {
-            verified: false,
-            verifyingOtp: false,
-            otpSent: false,
             selectedPlanId: 'silver',
             selectedAddons: new Set()
         };
@@ -1335,18 +1320,18 @@
         function getIdentity() {
             return {
                 name: byId('booking-name').value.trim(),
-                email: byId('booking-email').value.trim().toLowerCase()
+                phone: byId('booking-phone').value.trim()
             };
         }
 
-        function isValidEmail(email) {
-            return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+        function isValidPhone(phone) {
+            return phone.replace(/\D/g, '').length >= 10 && phone.replace(/\D/g, '').length <= 15;
         }
 
         function validateIdentity() {
             const identity = getIdentity();
-            if (identity.name.length < 2) throw new Error('Please enter your name before continuing.');
-            if (!isValidEmail(identity.email)) throw new Error('Please enter a valid email ID.');
+            if (identity.name.length < 2) throw new Error('Please enter your full name before continuing.');
+            if (!isValidPhone(identity.phone)) throw new Error('Please enter a valid phone number.');
             return identity;
         }
 
@@ -1392,61 +1377,9 @@
             });
         }
 
-        function resetVerification(message, invalidateOtp = false) {
-            bookingState.verified = false;
-            if (invalidateOtp) bookingState.otpSent = false;
-            byId('continue-to-plans').disabled = true;
-            if (message) setBookingStatus(message, 'info');
-        }
-
-        async function sendOtp() {
-            const button = byId('send-otp');
-            try {
-                const identity = validateIdentity();
-                setLoading(button, true, 'Sending...');
-                setBookingStatus('Sending your secure OTP...', 'info');
-                const response = await apiPost('/api/send-otp', identity);
-                bookingState.otpSent = true;
-                resetVerification();
-                byId('booking-otp').value = '';
-                const devHint = response.devOtp ? ` Dev OTP: ${response.devOtp}` : '';
-                setBookingStatus(`${response.message}${devHint}`, 'success');
-                byId('booking-otp').focus();
-            } catch (error) {
-                setBookingStatus(error.message, 'error');
-            } finally {
-                setLoading(button, false);
-            }
-        }
-
-        async function verifyOtp() {
-            if (bookingState.verifyingOtp || bookingState.verified) return;
-            const button = byId('verify-otp');
-            try {
-                const identity = validateIdentity();
-                if (!bookingState.otpSent) throw new Error('Please send an OTP before verification.');
-                const otp = byId('booking-otp').value.replace(/\D/g, '').slice(0, 6);
-                if (otp.length !== 6) throw new Error('Enter the complete 6-digit OTP.');
-                bookingState.verifyingOtp = true;
-                setLoading(button, true, 'Verifying...');
-                const response = await apiPost('/api/verify-otp', { email: identity.email, otp });
-                bookingState.verified = Boolean(response.verified);
-                byId('continue-to-plans').disabled = !bookingState.verified;
-                setBookingStatus(response.message || 'Email verified successfully.', 'success');
-            } catch (error) {
-                bookingState.verified = false;
-                byId('continue-to-plans').disabled = true;
-                setBookingStatus(error.message, 'error');
-            } finally {
-                bookingState.verifyingOtp = false;
-                setLoading(button, false);
-            }
-        }
-
         function proceedToPlans() {
             try {
                 validateIdentity();
-                if (!bookingState.verified) throw new Error('Please verify your email OTP before selecting a plan.');
                 setBookingStatus('', 'info');
                 showStep('plans');
                 updateSummary();
@@ -1556,7 +1489,6 @@
             const button = byId('pay-now');
             try {
                 const identity = validateIdentity();
-                if (!bookingState.verified) throw new Error('Please complete OTP verification first.');
                 const quote = calculateClientQuote();
                 setLoading(button, true, 'Preparing UPI...');
                 setBookingStatus('Generating your secure UPI payment QR...', 'info');
@@ -1730,8 +1662,6 @@
         }
 
         function setupBookingEvents() {
-            byId('send-otp').addEventListener('click', sendOtp);
-            byId('verify-otp').addEventListener('click', verifyOtp);
             byId('continue-to-plans').addEventListener('click', proceedToPlans);
             byId('back-to-details').addEventListener('click', () => showStep('details'));
             byId('pay-now').addEventListener('click', startCheckout);
@@ -1752,24 +1682,6 @@
             byId('confirm-upi-payment').addEventListener('click', confirmUpiPayment);
             byId('upi-utr').addEventListener('input', (event) => {
                 event.target.value = event.target.value.toUpperCase().replace(/[^A-Z0-9-]/g, '').slice(0, 36);
-            });
-
-            ['booking-name', 'booking-email'].forEach(id => {
-                byId(id).addEventListener('input', () => {
-                    if (bookingState.verified || bookingState.otpSent) {
-                        resetVerification('Details changed. Please send and verify a fresh OTP.', true);
-                    } else {
-                        resetVerification();
-                    }
-                });
-            });
-
-            byId('booking-otp').addEventListener('input', event => {
-                event.target.value = event.target.value.replace(/\D/g, '').slice(0, 6);
-                if (event.target.value.length === 6 && !bookingState.verified) {
-                    clearTimeout(otpDebounce);
-                    otpDebounce = setTimeout(verifyOtp, 250);
-                }
             });
 
             byId('custom-work-enabled').addEventListener('change', event => {

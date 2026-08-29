@@ -14,10 +14,6 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 const HOST = process.env.HOST || '0.0.0.0';
 
-const OTP_TTL_MS = 10 * 60 * 1000;
-const OTP_MAX_ATTEMPTS = 5;
-const OTP_PEPPER = process.env.OTP_PEPPER || crypto.randomBytes(32).toString('hex');
-
 // Vercel serverless functions can only write to /tmp. For local/dev hosting,
 // keep using the project data folder. For durable production storage, connect a DB.
 const DATA_DIR = process.env.VERCEL ? path.join('/tmp', 'sahil-portfolio-data') : path.join(__dirname, 'data');
@@ -52,7 +48,6 @@ const ADD_ONS = [
   { id: 'copy-polish', name: 'Content Polish', price: 250 }
 ];
 
-const otpStore = new Map();
 const pendingOrders = new Map();
 
 app.set('trust proxy', 1);
@@ -78,14 +73,6 @@ app.use(
   })
 );
 app.use(express.json({ limit: '60kb' }));
-
-const otpLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 5,
-  standardHeaders: 'draft-7',
-  legacyHeaders: false,
-  message: { message: 'Too many OTP requests. Please wait a few minutes and try again.' }
-});
 
 const checkoutLimiter = rateLimit({
   windowMs: 10 * 60 * 1000,
@@ -130,17 +117,6 @@ function escapeHtml(value = '') {
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#039;');
-}
-
-function hashOtp(email, otp) {
-  return crypto.createHmac('sha256', OTP_PEPPER).update(`${email}:${otp}`).digest('hex');
-}
-
-function safeCompareHex(a = '', b = '') {
-  const left = Buffer.from(String(a), 'hex');
-  const right = Buffer.from(String(b), 'hex');
-  if (left.length !== right.length || left.length === 0) return false;
-  return crypto.timingSafeEqual(left, right);
 }
 
 function hasEmailConfig() {
@@ -331,9 +307,18 @@ function calculateQuote({ planId, addons = [], customWork = {} }) {
   };
 }
 
+function normalizePhone(phone = '') {
+  return String(phone).trim().replace(/[^\d+()\s-]/g, '').replace(/\s+/g, ' ');
+}
+
+function isValidPhone(phone = '') {
+  const digits = String(phone).replace(/\D/g, '');
+  return digits.length >= 10 && digits.length <= 15;
+}
+
 function validateBookingIdentity(body) {
   const name = cleanText(body.name, 80);
-  const email = normalizeEmail(body.email);
+  const phone = normalizePhone(body.phone || body.number);
 
   if (name.length < 2) {
     const error = new Error('Please enter your full name.');
@@ -341,23 +326,13 @@ function validateBookingIdentity(body) {
     throw error;
   }
 
-  if (!isValidEmail(email)) {
-    const error = new Error('Please enter a valid email address.');
+  if (!isValidPhone(phone)) {
+    const error = new Error('Please enter a valid phone number.');
     error.status = 400;
     throw error;
   }
 
-  return { name, email };
-}
-
-function getVerifiedOtpRecord(email) {
-  const record = otpStore.get(email);
-  if (!record || !record.verified || record.expiresAt < Date.now()) {
-    const error = new Error('Please verify your email with OTP before checkout.');
-    error.status = 403;
-    throw error;
-  }
-  return record;
+  return { name, phone };
 }
 
 function publicQuote(quote) {
@@ -492,13 +467,13 @@ async function notifyBookingSubmitted(booking) {
     to: ownerEmail,
     toName: 'Sahil Sinha',
     subject: `New UPI booking submitted: ${booking.bookingId}`,
-    text: `New booking submitted for manual UPI verification.\n\nBooking ID: ${booking.bookingId}\nName: ${booking.name}\nEmail: ${booking.email}\nPlan: ${booking.quote.plan.name}\nAdd-ons: ${addons}\nCustom work: ${customWork}\nTotal: ₹${booking.quote.total}\nUPI Reference/UTR: ${booking.upi.utr}\nUPI Transaction Ref: ${booking.upi.transactionRef}\n\nPlease confirm this payment in your UPI/bank app before starting work.`, 
+    text: `New booking submitted for manual UPI verification.\n\nBooking ID: ${booking.bookingId}\nName: ${booking.name}\nPhone: ${booking.phone}\nPlan: ${booking.quote.plan.name}\nAdd-ons: ${addons}\nCustom work: ${customWork}\nTotal: ₹${booking.quote.total}\nUPI Reference/UTR: ${booking.upi.utr}\nUPI Transaction Ref: ${booking.upi.transactionRef}\n\nPlease confirm this payment in your UPI/bank app before starting work.`,
     html: `
       <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; line-height: 1.6; color: #111;">
         <h2>New UPI booking submitted</h2>
         <p><strong>Booking ID:</strong> ${escapeHtml(booking.bookingId)}</p>
         <p><strong>Name:</strong> ${escapeHtml(booking.name)}</p>
-        <p><strong>Email:</strong> ${escapeHtml(booking.email)}</p>
+        <p><strong>Phone:</strong> ${escapeHtml(booking.phone)}</p>
         <p><strong>Plan:</strong> ${escapeHtml(booking.quote.plan.name)}</p>
         <p><strong>Add-ons:</strong> ${escapeHtml(addons)}</p>
         <p><strong>Custom work:</strong> ${escapeHtml(customWork)}</p>
@@ -513,10 +488,6 @@ async function notifyBookingSubmitted(booking) {
 
 function cleanupExpiredMemory() {
   const now = Date.now();
-
-  for (const [email, record] of otpStore.entries()) {
-    if (record.expiresAt < now) otpStore.delete(email);
-  }
 
   for (const [orderId, order] of pendingOrders.entries()) {
     if (order.expiresAt < now) pendingOrders.delete(orderId);
@@ -540,117 +511,6 @@ app.get('/api/config', (_req, res) => {
   });
 });
 
-app.post('/api/send-otp', otpLimiter, async (req, res, next) => {
-  try {
-    const { name, email } = validateBookingIdentity(req.body);
-    const otp = crypto.randomInt(100000, 1000000).toString();
-    const expiresAt = Date.now() + OTP_TTL_MS;
-
-    otpStore.set(email, {
-      name,
-      email,
-      otpHash: hashOtp(email, otp),
-      attempts: 0,
-      verified: false,
-      expiresAt,
-      createdAt: new Date().toISOString()
-    });
-
-    if (!hasAnyEmailConfig()) {
-      if (process.env.NODE_ENV === 'production') {
-        const error = new Error('Email service is not configured. Please try again later.');
-        error.status = 503;
-        throw error;
-      }
-
-      console.info(`[dev] OTP for ${email}: ${otp}`);
-      return res.json({
-        message: 'Development mode: email service is not configured, so the OTP is shown for testing.',
-        devOtp: otp,
-        expiresInMinutes: OTP_TTL_MS / 60000
-      });
-    }
-
-    try {
-      await sendTransactionalEmail({
-        to: email,
-        toName: name,
-        subject: 'Your Sahil Sinha Portfolio booking OTP',
-        text: `Hi ${name},\n\nYour OTP is ${otp}. It expires in 10 minutes.\n\nIf you did not request this, you can ignore this email.`,
-        html: `
-          <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; line-height: 1.6; color: #111;">
-            <h2>Your booking verification code</h2>
-            <p>Hi ${escapeHtml(name)},</p>
-            <p>Use this 6-digit OTP to continue your Sahil Sinha portfolio booking:</p>
-            <p style="font-size: 28px; font-weight: 800; letter-spacing: 8px;">${otp}</p>
-            <p>This code expires in 10 minutes. If you did not request it, you can ignore this email.</p>
-          </div>
-        `
-      });
-    } catch (mailError) {
-      if (process.env.NODE_ENV !== 'production') {
-        console.warn(`[dev] Email delivery failed for ${email}: ${mailError.message}`);
-        console.info(`[dev] OTP for ${email}: ${otp}`);
-        return res.json({
-          message: 'Email service is configured, but this environment could not deliver the email. Development OTP is shown for testing.',
-          devOtp: otp,
-          expiresInMinutes: OTP_TTL_MS / 60000
-        });
-      }
-
-      const error = new Error('Unable to deliver OTP email right now. Please check the email service configuration.');
-      error.status = 503;
-      throw error;
-    }
-
-    res.json({ message: 'OTP sent successfully. Please check your email.', expiresInMinutes: OTP_TTL_MS / 60000 });
-  } catch (error) {
-    next(error);
-  }
-});
-
-app.post('/api/verify-otp', async (req, res, next) => {
-  try {
-    const email = normalizeEmail(req.body.email);
-    const otp = String(req.body.otp || '').trim();
-
-    if (!isValidEmail(email) || !/^\d{6}$/.test(otp)) {
-      const error = new Error('Please enter the 6-digit OTP sent to your email.');
-      error.status = 400;
-      throw error;
-    }
-
-    const record = otpStore.get(email);
-    if (!record || record.expiresAt < Date.now()) {
-      const error = new Error('OTP expired or was not requested. Please send a new OTP.');
-      error.status = 400;
-      throw error;
-    }
-
-    if (record.attempts >= OTP_MAX_ATTEMPTS) {
-      otpStore.delete(email);
-      const error = new Error('Too many invalid attempts. Please request a new OTP.');
-      error.status = 429;
-      throw error;
-    }
-
-    record.attempts += 1;
-    const submittedHash = hashOtp(email, otp);
-
-    if (!safeCompareHex(submittedHash, record.otpHash)) {
-      const error = new Error('Invalid OTP. Please check the code and try again.');
-      error.status = 400;
-      throw error;
-    }
-
-    record.verified = true;
-    record.verifiedAt = new Date().toISOString();
-    res.json({ verified: true, message: 'Email verified successfully.' });
-  } catch (error) {
-    next(error);
-  }
-});
-
 app.post('/api/create-order', checkoutLimiter, async (req, res, next) => {
   try {
     const upi = getUpiConfig();
@@ -660,8 +520,7 @@ app.post('/api/create-order', checkoutLimiter, async (req, res, next) => {
       throw error;
     }
 
-    const { name, email } = validateBookingIdentity(req.body);
-    const otpRecord = getVerifiedOtpRecord(email);
+    const { name, phone } = validateBookingIdentity(req.body);
     const quote = calculateQuote(req.body);
     const orderId = `UPI${Date.now()}${crypto.randomBytes(3).toString('hex').toUpperCase()}`;
     const bookingId = `BK${Date.now()}${crypto.randomBytes(3).toString('hex').toUpperCase()}`;
@@ -687,8 +546,7 @@ app.post('/api/create-order', checkoutLimiter, async (req, res, next) => {
       bookingId,
       orderId,
       name,
-      email,
-      otpVerifiedAt: otpRecord.verifiedAt,
+      phone,
       quote: publicQuote(quote),
       paymentMethod: 'upi',
       status: 'upi_created',
