@@ -525,6 +525,8 @@
         .success-card button { position: relative; z-index: 1; }
         .success-card h3 { font-size: 2rem; margin-bottom: 12px; }
         .success-card p { color: var(--text-soft); line-height: 1.7; }
+        .success-email-link { margin-top: 18px; }
+        .success-email-link.hidden { display: none; }
 
         .upi-card {
             width: min(900px, 100%);
@@ -885,7 +887,7 @@
         <div class="mesh-orb orb-two"></div>
         <p class="section-kicker">Secure Booking</p>
         <h2 class="section-title">Start your premium website build.</h2>
-        <p class="section-copy">Enter your full name, phone number, and email, choose a service tier, add optional extras, and pay directly through UPI using a generated QR code or UPI app link. The final total uses the updated package pricing.</p>
+        <p class="section-copy">Enter your details, choose a service tier, and pay the exact total directly through UPI using the generated QR code or UPI app link. No payment gateway or environment-variable setup is needed. If UPI is not available on your device, you can send the booking request by email instead.</p>
 
         <div class="booking-panel" aria-live="polite">
             <div class="booking-progress">
@@ -937,11 +939,12 @@
                     <div class="summary-row"><span>Base plan</span><strong id="summary-base">₹0</strong></div>
                     <div class="summary-row"><span>Add-ons & custom work</span><strong id="summary-addons">₹0</strong></div>
                     <div class="summary-row total"><span>Final total</span><strong id="summary-total">₹0</strong></div>
-                    <p class="gateway-note" id="gateway-note">UPI checkout creates a secure payment QR with the final amount. Backend recalculates totals before generating the payment request.</p>
+                    <p class="gateway-note" id="gateway-note">Direct UPI is ready in this site. Scan the QR or open your UPI app, pay the exact amount, then enter the UTR. Payment confirmation is checked manually.</p>
                 </div>
 
                 <div class="checkout-actions">
                     <button class="ghost-link" id="back-to-details" type="button">Back</button>
+                    <button class="glass-small-button" id="direct-booking-email" type="button">Book by Email</button>
                     <button class="glass-button" id="pay-now" type="button">Create UPI Payment</button>
                 </div>
             </div>
@@ -1017,6 +1020,7 @@
             <div class="success-icon">✓</div>
             <h3 id="success-title">Payment Details Submitted</h3>
             <p id="success-copy">Your UPI payment details have been submitted for manual verification.</p>
+            <a class="glass-button success-email-link hidden" id="send-booking-email" href="#">Email Booking Details to Sahil</a>
             <button class="glass-button" id="close-success" type="button" style="margin-top: 22px;">Done</button>
         </div>
     </div>
@@ -1367,10 +1371,10 @@
                 const upiLabel = config.upiIdMasked ? ` for ${config.upiPayeeName} (${config.upiIdMasked})` : '';
                 byId('gateway-note').textContent = paymentReady
                     ? `UPI checkout is enabled${upiLabel}. Scan the generated QR, pay the exact total, then submit your UTR/reference ID.`
-                    : 'UPI checkout is ready in code. Add UPI_ID in .env to activate direct UPI payments.';
+                    : 'UPI checkout is temporarily unavailable. You can still use Book by Email below.';
             } catch (error) {
                 paymentReady = false;
-                byId('gateway-note').textContent = 'UPI checkout is ready in code. Add UPI_ID in .env to activate direct UPI payments.';
+                byId('gateway-note').textContent = 'UPI checkout is temporarily unavailable. You can still use Book by Email below.';
             } finally {
                 renderPlans();
                 renderAddons();
@@ -1495,6 +1499,45 @@
             }
         }
 
+        const bookingOwnerEmail = 'minersahil20@gmail.com';
+
+        function buildDirectBookingEmailUrl(paymentReference = 'Not paid yet') {
+            const identity = validateIdentity();
+            const quote = calculateClientQuote();
+            const addons = quote.selectedAddons.map(addon => `${addon.name} (₹${addon.price})`).join(', ') || 'None';
+            const customWork = quote.customWork.enabled
+                ? `${quote.customWork.description || 'Custom extra work'} (₹${quote.customWork.amount})`
+                : 'None';
+            const subject = `Website booking request - ${quote.plan.name}`;
+            const body = [
+                'Hello Sahil,',
+                '',
+                'I would like to book a website project through your portfolio.',
+                `Name: ${identity.name}`,
+                `Phone: ${identity.phone}`,
+                `Email: ${identity.email}`,
+                `Plan: ${quote.plan.name}`,
+                `Add-ons: ${addons}`,
+                `Custom work: ${customWork}`,
+                `Total: ₹${quote.total}`,
+                `UPI reference / UTR: ${paymentReference}`,
+                '',
+                'Please confirm the booking and share the next steps.',
+                '',
+                'Thank you.'
+            ].join('\n');
+            return `mailto:${bookingOwnerEmail}?${new URLSearchParams({ subject, body }).toString()}`;
+        }
+
+        function startDirectBookingEmail() {
+            try {
+                window.location.href = buildDirectBookingEmailUrl();
+                setBookingStatus('Your email app should open with the booking request filled in.', 'success');
+            } catch (error) {
+                setBookingStatus(error.message, 'error');
+            }
+        }
+
         async function startCheckout() {
             const button = byId('pay-now');
             try {
@@ -1515,8 +1558,8 @@
                 setBookingStatus('UPI QR created. Pay the exact amount and submit the UTR/reference ID.', 'success');
             } catch (error) {
                 setLoading(button, false);
-                const configHint = error.message.includes('UPI payment is not configured')
-                    ? ' Send me your UPI ID and payee name, or add UPI_ID in .env.'
+                const configHint = error.message.includes('embedded UPI payment address')
+                    ? ' Please use Book by Email while the payment address is being updated.'
                     : '';
                 setBookingStatus(`${error.message}${configHint}`, 'error');
             }
@@ -1537,8 +1580,21 @@
                 setLoading(button, true, 'Submitting...');
                 setBookingStatus('Submitting payment details for manual verification...', 'info');
 
+                const originalQuote = currentUpiOrder.booking;
                 const verification = await apiPost('/api/verify-payment', {
                     orderId: currentUpiOrder.order.id,
+                    bookingId: currentUpiOrder.order.bookingId,
+                    orderExpiresAt: currentUpiOrder.order.expiresAt,
+                    customer: currentUpiOrder.customer || getIdentity(),
+                    planId: originalQuote.plan.id,
+                    addons: originalQuote.addons.map(addon => addon.id),
+                    customWork: originalQuote.customWork
+                        ? {
+                            enabled: true,
+                            description: originalQuote.customWork.description,
+                            amount: originalQuote.customWork.price
+                        }
+                        : { enabled: false },
                     utr,
                     payerName: getIdentity().name
                 });
@@ -1556,10 +1612,18 @@
 
         function showSuccess(verification, total) {
             byId('success-title').textContent = 'Payment Details Submitted';
+            const emailLink = byId('send-booking-email');
+            if (verification.bookingEmailUrl) {
+                emailLink.href = verification.bookingEmailUrl;
+                emailLink.classList.remove('hidden');
+            } else {
+                emailLink.classList.add('hidden');
+            }
+
             const notificationMessage = verification.notificationSent
                 ? ' A notification email has been sent to Sahil.'
-                : ' The booking was saved, but notification email delivery is not configured yet.';
-            byId('success-copy').textContent = `Booking ${verification.bookingId} has been saved for ${rupees.format(total)}. UPI reference/UTR: ${verification.paymentReference}.${notificationMessage} Please wait for manual payment verification before work starts.`;
+                : ' Use the email button below to send the booking details to Sahil.';
+            byId('success-copy').textContent = `Booking ${verification.bookingId} was received for ${rupees.format(total)}. UPI reference/UTR: ${verification.paymentReference}.${notificationMessage} Please wait for manual payment verification before work starts.`;
             byId('success-modal').classList.remove('hidden');
         }
 
@@ -1677,6 +1741,7 @@
         function setupBookingEvents() {
             byId('continue-to-plans').addEventListener('click', proceedToPlans);
             byId('back-to-details').addEventListener('click', () => showStep('details'));
+            byId('direct-booking-email').addEventListener('click', startDirectBookingEmail);
             byId('pay-now').addEventListener('click', startCheckout);
             byId('close-success').addEventListener('click', () => byId('success-modal').classList.add('hidden'));
             byId('success-modal').addEventListener('click', (event) => {
