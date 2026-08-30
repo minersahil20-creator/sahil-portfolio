@@ -48,6 +48,19 @@ const ADD_ONS = [
   { id: 'copy-polish', name: 'Content Polish', price: 250 }
 ];
 
+// A UPI ID is a public payment address, not a secret credential. Keep the
+// checkout identity in source so the Vercel deployment works without a second
+// environment-variable setup step. Change these values when the payee changes.
+const EMBEDDED_CHECKOUT_CONFIG = Object.freeze({
+  upiId: '8481083347@naviaxis',
+  payeeName: 'Sahil Sinha',
+  transactionNote: 'Sahil Portfolio Booking',
+  ownerEmail: 'minersahil20@gmail.com'
+});
+
+// This map is only a warm-process optimisation. Vercel may send create-order
+// and verify-payment to different serverless instances, so verification must
+// also work without this in-memory state.
 const pendingOrders = new Map();
 
 app.set('trust proxy', 1);
@@ -215,9 +228,9 @@ async function sendTransactionalEmail({ to, toName = '', subject, text, html }) 
 }
 
 function getUpiConfig() {
-  const upiId = cleanText(process.env.UPI_ID || '', 320);
-  const payeeName = cleanText(process.env.UPI_PAYEE_NAME || 'Sahil Sinha', 80);
-  const transactionNote = cleanText(process.env.UPI_TRANSACTION_NOTE || 'Sahil Portfolio Booking', 80);
+  const upiId = cleanText(EMBEDDED_CHECKOUT_CONFIG.upiId, 320);
+  const payeeName = cleanText(EMBEDDED_CHECKOUT_CONFIG.payeeName, 80);
+  const transactionNote = cleanText(EMBEDDED_CHECKOUT_CONFIG.transactionNote, 80);
 
   return {
     upiId,
@@ -251,12 +264,64 @@ function buildUpiUri({ upiId, payeeName, amount, note }) {
   return `upi://pay?${params}`;
 }
 
+function buildBookingEmailUrl(booking) {
+  const addons = booking.quote.addons.map((addon) => `${addon.name} (₹${addon.price})`).join(', ') || 'None';
+  const customWork = booking.quote.customWork
+    ? `${booking.quote.customWork.description} (₹${booking.quote.customWork.price})`
+    : 'None';
+  const subject = `Website booking ${booking.bookingId} - ${booking.quote.plan.name}`;
+  const body = [
+    'Hello Sahil,',
+    '',
+    'I have completed a website booking through your portfolio.',
+    `Booking ID: ${booking.bookingId}`,
+    `Name: ${booking.name}`,
+    `Phone: ${booking.phone}`,
+    `Email: ${booking.email}`,
+    `Plan: ${booking.quote.plan.name}`,
+    `Add-ons: ${addons}`,
+    `Custom work: ${customWork}`,
+    `Total: ₹${booking.quote.total}`,
+    `UPI reference / UTR: ${booking.upi.utr || 'Not provided'}`,
+    '',
+    'Please confirm the payment and contact me with the next steps.',
+    '',
+    'Thank you.'
+  ].join('\n');
+
+  const query = new URLSearchParams({ subject, body }).toString();
+  return `mailto:${EMBEDDED_CHECKOUT_CONFIG.ownerEmail}?${query}`;
+}
+
+function createPendingBooking({ orderId, bookingId, identity, quote, upi, expiresAt }) {
+  const transactionRef = orderId.replace(/[^A-Z0-9]/gi, '').slice(0, 35);
+  const note = cleanText(`${upi.transactionNote} ${bookingId}`, 80);
+
+  return {
+    bookingId,
+    orderId,
+    ...identity,
+    quote: publicQuote(quote),
+    paymentMethod: 'upi',
+    status: 'upi_created',
+    upi: {
+      upiId: upi.upiId,
+      payeeName: upi.payeeName,
+      transactionRef,
+      note
+    },
+    createdAt: new Date().toISOString(),
+    ...(expiresAt ? { expiresAt } : {})
+  };
+}
+
 function findPlan(planId) {
   return SERVICE_PLANS.find((plan) => plan.id === planId);
 }
 
 function calculateQuote({ planId, addons = [], customWork = {} }) {
   const plan = findPlan(planId);
+  const safeCustomWork = customWork && typeof customWork === 'object' ? customWork : {};
   if (!plan) {
     const error = new Error('Please select a valid service plan.');
     error.status = 400;
@@ -274,12 +339,12 @@ function calculateQuote({ planId, addons = [], customWork = {} }) {
     return addon;
   });
 
-  const customDescription = cleanText(customWork.description || '', 180);
-  const customAmount = Number(customWork.amount || 0);
+  const customDescription = cleanText(safeCustomWork.description || '', 180);
+  const customAmount = Number(safeCustomWork.amount || 0);
   const roundedCustomAmount = Math.round(customAmount);
   let normalizedCustomWork = null;
 
-  if (customWork.enabled || customDescription || roundedCustomAmount > 0) {
+  if (safeCustomWork.enabled || customDescription || roundedCustomAmount > 0) {
     if (!Number.isFinite(customAmount) || roundedCustomAmount < 0 || roundedCustomAmount > 50000) {
       const error = new Error('Custom work amount must be between ₹0 and ₹50,000.');
       error.status = 400;
@@ -517,7 +582,8 @@ app.get('/api/config', (_req, res) => {
     paymentsReady: upi.ready,
     upiReady: upi.ready,
     upiPayeeName: upi.payeeName,
-    upiIdMasked: upi.ready ? maskUpiId(upi.upiId) : ''
+    upiIdMasked: upi.ready ? maskUpiId(upi.upiId) : '',
+    paymentConfigSource: 'embedded'
   });
 });
 
@@ -525,22 +591,29 @@ app.post('/api/create-order', checkoutLimiter, async (req, res, next) => {
   try {
     const upi = getUpiConfig();
     if (!upi.ready) {
-      const error = new Error('UPI payment is not configured yet. Add UPI_ID to .env to enable checkout.');
+      const error = new Error('The embedded UPI payment address is invalid. Please contact Sahil before paying.');
       error.status = 503;
       throw error;
     }
 
-    const { name, phone, email } = validateBookingIdentity(req.body);
+    const identity = validateBookingIdentity(req.body);
     const quote = calculateQuote(req.body);
     const orderId = `UPI${Date.now()}${crypto.randomBytes(3).toString('hex').toUpperCase()}`;
     const bookingId = `BK${Date.now()}${crypto.randomBytes(3).toString('hex').toUpperCase()}`;
-    const transactionRef = orderId.replace(/[^A-Z0-9]/gi, '').slice(0, 35);
-    const note = cleanText(`${upi.transactionNote} ${bookingId}`, 80);
+    const expiresAt = Date.now() + 60 * 60 * 1000;
+    const pendingBooking = createPendingBooking({
+      orderId,
+      bookingId,
+      identity,
+      quote,
+      upi,
+      expiresAt
+    });
     const upiUri = buildUpiUri({
       upiId: upi.upiId,
       payeeName: upi.payeeName,
       amount: quote.total,
-      note
+      note: pendingBooking.upi.note
     });
     const qrDataUrl = await QRCode.toDataURL(upiUri, {
       errorCorrectionLevel: 'M',
@@ -552,34 +625,17 @@ app.post('/api/create-order', checkoutLimiter, async (req, res, next) => {
       }
     });
 
-    const pendingBooking = {
-      bookingId,
-      orderId,
-      name,
-      phone,
-      email,
-      quote: publicQuote(quote),
-      paymentMethod: 'upi',
-      status: 'upi_created',
-      upi: {
-        upiId: upi.upiId,
-        payeeName: upi.payeeName,
-        transactionRef,
-        note
-      },
-      createdAt: new Date().toISOString(),
-      expiresAt: Date.now() + 60 * 60 * 1000
-    };
-
     pendingOrders.set(orderId, pendingBooking);
 
     res.json({
       order: {
         id: orderId,
+        bookingId,
         amount: quote.total,
         currency: 'INR',
         expiresAt: pendingBooking.expiresAt
       },
+      customer: identity,
       booking: publicQuote(quote),
       payment: {
         method: 'upi',
@@ -587,8 +643,8 @@ app.post('/api/create-order', checkoutLimiter, async (req, res, next) => {
         payeeName: upi.payeeName,
         upiUri,
         qrDataUrl,
-        transactionRef,
-        note
+        transactionRef: pendingBooking.upi.transactionRef,
+        note: pendingBooking.upi.note
       }
     });
   } catch (error) {
@@ -647,7 +703,9 @@ app.post('/api/verify-payment', checkoutLimiter, async (req, res, next) => {
     const utr = cleanText(req.body.utr || req.body.upiTransactionId, 40).toUpperCase();
     const payerName = cleanText(req.body.payerName || '', 80);
 
-    if (!orderId || !/^[A-Z0-9-]{8,40}$/i.test(orderId)) {
+    // The order ID is intentionally recognisable, but it is not a secret. The
+    // payment is still manual and must be checked in the UPI/bank app.
+    if (!orderId || !/^UPI[0-9]{10,20}[A-F0-9]{6}$/i.test(orderId)) {
       const error = new Error('Invalid UPI order reference. Please create the payment request again.');
       error.status = 400;
       throw error;
@@ -659,11 +717,43 @@ app.post('/api/verify-payment', checkoutLimiter, async (req, res, next) => {
       throw error;
     }
 
-    const pendingBooking = pendingOrders.get(orderId);
+    let pendingBooking = pendingOrders.get(orderId);
+    if (pendingBooking && pendingBooking.expiresAt && pendingBooking.expiresAt < Date.now()) {
+      pendingOrders.delete(orderId);
+      pendingBooking = null;
+    }
+
+    // Vercel can run each request on a different serverless instance. Rebuild
+    // the order from the original request when the warm-process map is empty;
+    // relying on a Map here is the reason the local flow used to fail in prod.
     if (!pendingBooking) {
-      const error = new Error('Booking order not found or has expired. Please create a new UPI payment request.');
-      error.status = 404;
-      throw error;
+      const customer = req.body.customer && typeof req.body.customer === 'object' ? req.body.customer : req.body;
+      const identity = validateBookingIdentity(customer);
+      const quote = calculateQuote({
+        planId: req.body.planId,
+        addons: req.body.addons,
+        customWork: req.body.customWork
+      });
+      const upi = getUpiConfig();
+      const bookingId = cleanText(req.body.bookingId || '', 80);
+      const safeBookingId = /^BK[0-9]{10,20}[A-F0-9]{6}$/i.test(bookingId)
+        ? bookingId
+        : `BK${Date.now()}${crypto.randomBytes(3).toString('hex').toUpperCase()}`;
+      const orderExpiresAt = Number(req.body.orderExpiresAt || 0);
+
+      if (orderExpiresAt && orderExpiresAt < Date.now()) {
+        const error = new Error('This UPI payment request has expired. Please create a new payment request.');
+        error.status = 410;
+        throw error;
+      }
+
+      pendingBooking = createPendingBooking({
+        orderId,
+        bookingId: safeBookingId,
+        identity,
+        quote,
+        upi
+      });
     }
 
     const storedBooking = {
@@ -678,7 +768,16 @@ app.post('/api/verify-payment', checkoutLimiter, async (req, res, next) => {
     };
 
     delete storedBooking.expiresAt;
-    await appendBooking(storedBooking);
+
+    // Keep local development useful, but never let a Vercel filesystem hiccup
+    // prevent a customer from receiving the direct booking email fallback.
+    let bookingStored = false;
+    try {
+      await appendBooking(storedBooking);
+      bookingStored = true;
+    } catch (storageError) {
+      console.error('Unable to persist booking in this serverless instance:', storageError.message);
+    }
     pendingOrders.delete(orderId);
 
     let notificationSent = false;
@@ -694,8 +793,10 @@ app.post('/api/verify-payment', checkoutLimiter, async (req, res, next) => {
       orderId,
       paymentReference: utr,
       status: storedBooking.status,
+      bookingStored,
       notificationSent,
-      message: 'Payment details submitted. Your booking is pending manual UPI verification.'
+      bookingEmailUrl: buildBookingEmailUrl(storedBooking),
+      message: 'Payment details received. Your booking is pending manual UPI verification.'
     });
   } catch (error) {
     next(error);
